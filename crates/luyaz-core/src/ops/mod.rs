@@ -578,6 +578,7 @@ impl engine::Device for UbusDevice {
             return Ok(Reading {
                 value,
                 registered: chill::up().await,
+                wifi_verification_failed: false,
                 // 换卡不影响 CHILL：SIM 固定为空（sim_check 当成同一张）
                 sim: SimId {
                     iccid: String::new(),
@@ -594,6 +595,7 @@ impl engine::Device for UbusDevice {
             return Ok(Reading {
                 value: dual_sim::readback(&sim, &smart),
                 registered: registered(&text(&net, "network_type")),
+                wifi_verification_failed: false,
                 // 切主卡本来就换 ICCID：SIM 固定为空，sim_check 不取消（D1），由读回 + 数据通确认
                 sim: SimId {
                     iccid: String::new(),
@@ -619,6 +621,7 @@ impl engine::Device for UbusDevice {
         Ok(Reading {
             value,
             registered: registered(&text(&net, "network_type")),
+            wifi_verification_failed: false,
             sim: sim_id(&sim),
             data: self.data(&net).await,
             probe: None,

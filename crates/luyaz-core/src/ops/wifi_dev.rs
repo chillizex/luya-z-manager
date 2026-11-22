@@ -8,8 +8,8 @@
 //! - **写**：一个执行者任务里拿写锁，要动原厂总开关就先动（`wifi.set_module`：`Some(true)` 先开、
 //!   `Some(false)` 就是总开关关本身），再 `wifi.apply {set, reload:false}`（访客 best_effort）。
 //!   只动原厂总开关、没有 uci 要写时不 reload——开关自己已生效（B11 实测约 2 秒关 / 十几秒开），
-//!   确认在线程里等原厂开关、保存频段和运行布局一致。只改了发射功率：iw 热改、不重载。模块目标开且有冷写时，
-//!   锁交给系统线程重载和轮询，做完放锁。
+//!   确认在线程里等原厂开关、保存频段和运行布局一致。只改发射功率时热改并读回驱动，不重载。
+//!   重载后恢复未改动的功率由后台负责，开关确认只等布局。锁交给系统线程，验证结束后放锁。
 //! - **确认**（`Confirm::Wifi`）：读回对上目标，且 `Reading::registered` = AP 已按 uci 起来/关掉：
 //!   跟踪中的写以后台验证结果为准，只有未跟踪的写才当场核对布局。不看蜂窝或 DNS，SIM 记空（换卡不影响 Wi-Fi）。
 
@@ -226,15 +226,17 @@ impl WifiDev {
         Ok((m, Value::Object(v)))
     }
 
-    /// AP 是不是已经按 uci 起来/关掉（见模块说明）。
-    async fn aps_ready(&self, cfg: Option<wifi::Uci>) -> bool {
-        let Some(cfg) = cfg else { return false };
+    /// (已确认, 本次验证已失败)。只有后台验证结束后能报告终态失败。
+    async fn verification(&self, cfg: Option<wifi::Uci>) -> (bool, bool) {
         let v = *guard(&self.verify);
         match v {
-            Verify::Running => false,
-            Verify::Done(ok) => ok,
+            Verify::Running => (false, false),
+            Verify::Done(ok) => (cfg.is_some() && ok, !ok),
             Verify::Idle => {
-                crate::state::blocking(move || luyaz_wifi::settled_layout(&cfg) == Some(true)).await
+                let ready = crate::state::blocking(move || {
+                    cfg.is_some_and(|cfg| luyaz_wifi::settled_layout(&cfg) == Some(true))
+                }).await;
+                (ready, false)
             }
         }
     }
@@ -245,10 +247,12 @@ impl WifiDev {
             .as_ref()
             .and_then(|m| wifi::value(kind, m, &self.vault))
             .map(Value::Object);
+        let (registered, wifi_verification_failed) = self.verification(m).await;
         Ok(Reading {
             value,
             // Wi-Fi 项：AP 已经按 uci 起来/关掉（不是蜂窝注册）
-            registered: self.aps_ready(m).await,
+            registered,
+            wifi_verification_failed,
             sim: SimId {
                 iccid: String::new(),
                 slot: 0,
@@ -345,7 +349,7 @@ impl WifiDev {
         let module_on = plan.vendor.or(switches.module) == Some(true);
         let power_only = plan.txpower_only();
         let reload = module_on && !power_only && !plan.set.is_empty();
-        let power_bands = if reload || plan.vendor == Some(true) { [true; 2] } else { plan.txpower_changed() };
+        let power_bands = plan.txpower_changed();
         let expected = reload.then(|| wifi::simulate(&m, &plan));
         let (set, vendor, guest) = (plan.set_json(), plan.vendor, kind == Kind::Guest);
         // D7：拿不到写锁就什么都不写（Wi-Fi 锁已经拿着，lk 随返回放掉）
@@ -393,7 +397,9 @@ impl WifiDev {
                 } else {
                     luyaz_wifi::verify_no_reload(&UciHost)
                 };
-                if module_on && power_bands.contains(&true) {
+                // Only a requested power change may affect this operation's receipt. Reasserting
+                // saved power after an AP restart belongs to the background maintainer.
+                if module_on && data["verified"] == true && power_bands.contains(&true) {
                     let result = crate::state::wifi_map_sync()
                         .ok_or_else(|| "cannot read Wi-Fi power settings".to_owned())
                         .and_then(|cfg| crate::wifi_power::apply(&cfg, power_bands, &lk));
@@ -406,6 +412,9 @@ impl WifiDev {
                 eprintln!("ops: Wi-Fi change: reload finished {data}");
                 *guard(&verify) = Verify::Done(ok);
                 drop(lk);
+                if reload || vendor == Some(true) {
+                    crate::wifi_power::layout_changed();
+                }
                 crate::engines::wifi_dfs::layout_changed();
                 handle.spawn(async move {
                     crate::state::invalidate_cache();

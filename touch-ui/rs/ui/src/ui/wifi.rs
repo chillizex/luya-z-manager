@@ -286,6 +286,15 @@ impl Ui {
         }
     }
 
+    /// A change just ended on screen — confirmed, error or timeout — and the cover lifted
+    /// over the readback. The inactivity clock ran on under the cover, so a change that
+    /// outlasted the auto-off delay would blank the screen the moment it ended. Count the
+    /// idle window from the result instead: each terminal branch below clears the write in
+    /// the same step, so this fires exactly once per change, and autooff=0 never reads it.
+    fn wifi_idle_restart(&mut self) {
+        lv::trigger_activity();
+    }
+
     pub(super) fn wifi_busy(&self) -> bool {
         self.wifi.write.is_some() || self.wifi.power_write.is_some()
     }
@@ -342,6 +351,7 @@ impl Ui {
                     }
                     w.power_write = None;
                     kit::show(w.cover, false);
+                    self.wifi_idle_restart();
                 } else {
                     self.wifi.power_write = Some(write);
                 }
@@ -384,6 +394,7 @@ impl Ui {
                     }
                     w.write = None;
                     kit::show(w.cover, false);
+                    self.wifi_idle_restart();
                 } else {
                     self.wifi.write = Some(write);
                 }

@@ -105,6 +105,7 @@ impl Device for Dev {
         Ok(Reading {
             value: Some(json!(s.net_select)),
             registered: s.registered,
+            wifi_verification_failed: false,
             sim: s.sim.clone(),
             data: Some(DataPath {
                 expected: s.expected,

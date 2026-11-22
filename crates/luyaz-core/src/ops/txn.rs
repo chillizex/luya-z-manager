@@ -362,6 +362,8 @@ pub struct Reading {
     /// 经 `Spec::normalize` 同一套规范化的读回；空的、读不懂的为 None。
     pub value: Option<Value>,
     pub registered: bool,
+    /// The Wi-Fi verifier exhausted this write's hardware checks. A transient mismatch leaves this false.
+    pub wifi_verification_failed: bool,
     pub sim: SimId,
     /// 读不到为 None（应当有数据时就不能确认，等下一拍）。
     pub data: Option<DataPath>,
@@ -930,6 +932,10 @@ impl Txn {
                 return self.finish(Phase::Cancelled, Reason::ManualChange);
             }
         }
+        if self.confirm == Confirm::Wifi && r.wifi_verification_failed {
+            self.took_ms = Some(self.elapsed_prev_ms + now.saturating_sub(self.wait_start_ms));
+            return self.verification_expired();
+        }
         self.on_tick(now)
     }
 
@@ -972,6 +978,10 @@ impl Txn {
         if now.saturating_sub(self.wait_start_ms) < self.deadline_ms {
             return Next::Wait;
         }
+        self.verification_expired()
+    }
+
+    fn verification_expired(&mut self) -> Next {
         if self.phase == Phase::RollingBack {
             return self.finish(Phase::RollbackFailed, Reason::RollbackTimeout);
         }

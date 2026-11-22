@@ -307,6 +307,7 @@ fn steps_follow_readings() {
     let read = |v: &str, registered: bool| Reading {
         value: Some(v.into()),
         registered,
+        wifi_verification_failed: false,
         sim: sim(),
         data: Some(DataPath {
             expected: Some(false),

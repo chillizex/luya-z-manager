@@ -79,7 +79,10 @@ impl Target<'_> {
     }
 
     fn stable_for(self) -> Duration {
-        if matches!(self, Self::Written { .. }) { RELOAD_STABLE } else { Duration::ZERO }
+        match self {
+            Self::Master { wanted: true, .. } | Self::Written { .. } => RELOAD_STABLE,
+            _ => Duration::ZERO,
+        }
     }
 }
 
@@ -352,6 +355,18 @@ mod tests {
         assert_eq!(sample_result(&cfg, master(true), &r), Some(false));
         r.status = Some("state=ENABLED\nssid[0]=home5\n");
         assert_eq!(sample_result(&cfg, master(true), &r), Some(true));
+        let mut since = None;
+        let mut observe = |secs, sample: &Sample| {
+            has_settled(&mut since, Duration::from_secs(secs), master(true).stable_for(),
+                        sample_result(&cfg, master(true), sample))
+        };
+        assert!(!observe(7, &r));
+        r.links[1] = Some(false);
+        assert!(!observe(16, &r));
+        r.links[1] = Some(true);
+        assert!(!observe(20, &r));
+        assert!(!observe(34, &r));
+        assert!(observe(35, &r));
     }
 
     #[test]

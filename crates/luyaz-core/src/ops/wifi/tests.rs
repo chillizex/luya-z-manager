@@ -610,6 +610,7 @@ fn wifi_confirms_without_data() {
     let reading = |registered: bool| Reading {
         value: Some(json!({"band_2g.ssid": "Cafe", "on": true})),
         registered,
+        wifi_verification_failed: false,
         sim: SimId {
             iccid: String::new(),
             slot: 0,

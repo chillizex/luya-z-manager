@@ -21,6 +21,7 @@ A Chinese copy is in [CHANGELOG.zh-CN.md](CHANGELOG.zh-CN.md).
 
 ## Unreleased
 
+- core, touch: confirm Wi-Fi switches from the settled AP layout and restore saved transmit power in the background. Report exhausted driver checks immediately and keep the result visible for the configured screen timeout.
 - core, lweb, touch: offer 25%, 50%, 75% and 100% transmit power independently per Wi-Fi band. Show the saved setting and driver readback. Core applies whole-dBm steps under the current channel and firmware limits and restores the power after Wi-Fi restarts.
 - core, lweb, touch, scripts: manage several Mihomo configurations and switch Rule, Global or Direct mode. CHILL keeps profile caches separate and restores the previous working profile if activation fails. The touchscreen home page opens CHILL from the Mihomo status card.
 - scripts: keep the bypass DNS process from holding the CHILL write job open on U60 Pro CN B11.

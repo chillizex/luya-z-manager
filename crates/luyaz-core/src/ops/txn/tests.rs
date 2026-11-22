@@ -61,6 +61,7 @@ fn read(v: &str, registered: bool) -> Reading {
     Reading {
         value: Some(v.into()),
         registered,
+        wifi_verification_failed: false,
         sim: sim(),
         data: Some(DataPath {
             expected: Some(false),
@@ -1016,6 +1017,7 @@ fn chill_read(v: &str, probe: Option<bool>) -> Reading {
     Reading {
         value: Some(v.into()),
         registered: true,
+        wifi_verification_failed: false,
         sim: SimId {
             iccid: String::new(),
             slot: 0,
@@ -1103,6 +1105,7 @@ fn ap(v: &str) -> Reading {
     Reading {
         value: Some(v.into()),
         registered: true,
+        wifi_verification_failed: false,
         sim: no_sim(),
         data: None,
         probe: None,
@@ -1126,6 +1129,26 @@ fn wifi_waits_for_the_two_vendor_flags_and_the_verified_layout() {
     r.registered = true;
     assert_eq!(t.on_reading(&r, 5_000), Next::Done);
     assert_eq!(end(&t), (Phase::Confirmed, Some(Reason::Verified)));
+}
+
+#[test]
+fn wifi_stops_waiting_when_the_hardware_verifier_finishes_unsuccessfully() {
+    let mut r = ap("new");
+    r.registered = false;
+    let mut t = wifi_remote(false);
+    assert_eq!(t.on_reading(&r, 5_000), Next::Wait);
+    r.wifi_verification_failed = true;
+    assert_eq!(t.on_reading(&r, 47_000), Next::Done);
+    assert_eq!(end(&t), (Phase::Unverified, Some(Reason::NoRollback)));
+    assert_eq!(t.readback, r.value);
+    assert_eq!(t.took_ms, Some(46_000));
+
+    let mut t = wifi_remote(true);
+    assert_eq!(t.on_reading(&r, 47_000), Next::Rollback("old".into()));
+    t.rollback_sent(49_000);
+    r.value = Some("old".into());
+    assert_eq!(t.on_reading(&r, 67_000), Next::Done);
+    assert_eq!(end(&t), (Phase::RollbackFailed, Some(Reason::RollbackTimeout)));
 }
 
 #[test]
@@ -1269,6 +1292,7 @@ fn dual_read(v: Value, data_up: bool) -> Reading {
     Reading {
         value: Some(v),
         registered: true,
+        wifi_verification_failed: false,
         sim: SimId { iccid: String::new(), slot: 0 },
         data: Some(DataPath {
             expected: Some(true),

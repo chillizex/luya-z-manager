@@ -12,6 +12,7 @@ pub(crate) const PREF: [&str; 2] = ["wireless.wifi0.txpowerpercent", "wireless.w
 const CAP: [&str; 2] = ["wireless.wifi0.max_power", "wireless.wifi1.max_power"];
 const GUEST: [&str; 2] = ["guest_2g", "guest_5g"];
 const DEADLINE: Duration = Duration::from_secs(2);
+static LAYOUT_CHANGED: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
 #[derive(Clone, Copy, Default, Serialize)]
 pub(crate) struct Reading {
@@ -124,7 +125,7 @@ pub(crate) fn readings(cfg: Option<&layout::Uci>, info: [&str; 2], up: [bool; 2]
     })
 }
 
-fn ensure_iface(cfg: &layout::Uci, band: usize, iface: &str, phys: &str) -> Result<(), String> {
+fn ensure_iface(cfg: &layout::Uci, band: usize, iface: &str, phys: &str, verify: bool) -> Result<(), String> {
     let read = || iw(&["dev", iface, "info"]).as_deref().and_then(|out| link(out, band));
     let before = read().ok_or_else(|| format!("{iface}: no active AP channel"))?;
     let want = target(cfg, band, before, phys)
@@ -137,6 +138,9 @@ fn ensure_iface(cfg: &layout::Uci, band: usize, iface: &str, phys: &str) -> Resu
         .map_err(|e| format!("{iface}: setTxPower: {e}"))?;
     if !out.status.success() {
         return Err(format!("{iface}: setTxPower returned {}", out.status));
+    }
+    if !verify {
+        return Ok(()); // The next maintenance sample reads the driver again.
     }
     let expected = Link { mbm: Some(want), ..before };
     let until = Instant::now() + Duration::from_secs(5);
@@ -155,6 +159,10 @@ fn ensure_iface(cfg: &layout::Uci, band: usize, iface: &str, phys: &str) -> Resu
 }
 
 pub(crate) fn apply(cfg: &layout::Uci, bands: [bool; 2], _lock: &WifiLock) -> Result<(), String> {
+    apply_power(cfg, bands, true)
+}
+
+fn apply_power(cfg: &layout::Uci, bands: [bool; 2], verify: bool) -> Result<(), String> {
     let up = psm::main_up();
     let bands = std::array::from_fn::<_, 2, _>(|i| up[i] && bands[i] && percent(cfg, i).is_some());
     if !bands.contains(&true) {
@@ -171,11 +179,15 @@ pub(crate) fn apply(cfg: &layout::Uci, bands: [bool; 2], _lock: &WifiLock) -> Re
                 .is_ok_and(|s| s.trim() == "up")
         });
         for iface in std::iter::once(psm::MAIN_IFACES[i]).chain(guest) {
-            let result = ensure_iface(cfg, i, iface, &phys);
+            let result = ensure_iface(cfg, i, iface, &phys, verify);
             error = error.and(result);
         }
     }
     error
+}
+
+pub(crate) fn layout_changed() {
+    LAYOUT_CHANGED.notify_one();
 }
 
 /// The stock Wi-Fi startup and channel changes can reset the power. Reapply saved tiers
@@ -185,15 +197,18 @@ pub(crate) async fn maintain() {
         if psm::main_up().contains(&true) {
             crate::state::blocking(|| {
                 let path = crate::state::host_path(luyaz_wifi::LOCK_FILE);
-                if let Ok(lock) = luyaz_wifi::lock_at(&path, Duration::ZERO)
+                if let Ok(_lock) = luyaz_wifi::lock_at(&path, Duration::ZERO)
                     && let Some(cfg) = crate::state::wifi_map_sync()
                 {
                     let managed = std::array::from_fn(|i| percent(&cfg, i).is_some_and(|p| TX_POWER_TIERS.contains(&p)));
-                    let _ = apply(&cfg, managed, &lock);
+                    let _ = apply_power(&cfg, managed, false);
                 }
             }).await;
         }
-        tokio::time::sleep(Duration::from_secs(15)).await;
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(15)) => {},
+            _ = LAYOUT_CHANGED.notified() => {},
+        }
     }
 }
 

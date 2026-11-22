@@ -903,6 +903,70 @@ fn wifi_switch_waits_for_readback_and_blocks_touch() {
     assert_eq!(checked(), [false, false, true, true]);
 }
 
+/// The busy cover keeps the auto-off away while a change runs, but the inactivity clock
+/// keeps counting underneath: a change longer than the auto-off delay must not blank the
+/// screen the moment its result appears. The end restarts the idle window, once, and that
+/// window still blanks the screen after a full quiet stretch (the reported 2.4 GHz
+/// disable finishing at the auto screen-off).
+#[cfg(test)]
+#[test]
+fn wifi_switch_result_restarts_the_autooff_window() {
+    if isolated_render("render::wifi_switch_result_restarts_the_autooff_window", &["dark"]).is_none() {
+        return;
+    }
+    init_render_test();
+    let initial = WifiRead {
+        master: Some(false), module: Some(false), radios: [Some(false), Some(true)],
+        main: [Some(true); 2], power_save: Some(true), up: [false; 2], txpower: [WifiTxPower::default(); 2],
+    };
+    let wifi = Rc::new(RefCell::new(WifiTest { read: initial, ..WifiTest::default() }));
+    let src = Box::new(Replay {
+        feed: BTreeMap::new(), step: Rc::new(RefCell::new(None)), cur: Rc::new(RefCell::new(String::new())),
+        next: None, wifi_test: Some(wifi.clone()),
+    });
+    let model = Model { bl_is_on: 1, bl_panel_lit: 1, bl_is_lit: 1, ..Model::default() };
+    ui::create(Conf::parse("appearance=dark\nautooff=30000\n"), logic::launch_parse(&["luyaz-ui"]),
+        Rc::new(model), src, "luyaz-ui");
+    ui::with(|u| u.to_tab(ui::TAB_WIFI));
+    settle(1200);
+    let finger = |x, y, down| {
+        FX.store(x, Ordering::Relaxed);
+        FY.store(y, Ordering::Relaxed);
+        FDOWN.store(down, Ordering::Relaxed);
+        settle(100);
+    };
+    let a = ui::with(|u| u.wifi.sw[0].coords());
+    let (x, y) = ((a.x1 + a.x2) / 2, (a.y1 + a.y2) / 2);
+    fn has_text(o: Obj, text: &[u8]) -> bool {
+        !o.hidden() && ((checks::is_label(o) && o.text() == text)
+            || (0..o.child_count() as i32).any(|i| has_text(o.child(i), text)))
+    }
+    let overlay_has = |text: &str| has_text(Obj::layer_top(), text.as_bytes());
+    let pending = || overlay_has("正在处理，等设备确认 Wi-Fi");
+    let lit = || !ui::with(|u| u.screen_locked() || u.auto_slept);
+    finger(x, y, true); // the master switch: a change that will outlast the 30 s auto-off
+    finger(x, y, false);
+    assert!(pending());
+    settle(31_000);
+    assert!(pending(), "the result has not arrived yet");
+    assert!(lit(), "the busy cover keeps the screen lit past the auto-off delay");
+    wifi.borrow_mut().read = WifiRead {
+        master: Some(true), module: Some(true), up: [false, true], ..initial
+    };
+    let show_op = |slot: &str, id: &str, phase: &str, registered: bool| {
+        let mut model = ui::with(|u| (*u.model).clone());
+        model.screen_op = Some(format!(r#"{{"{slot}":{{"op_id":"{id}","phase":"{phase}","steps":[{{"key":"applied","done":true}},{{"key":"registered","done":{registered}}}]}}}}"#));
+        ui::set_model(Rc::new(model));
+        ui::with(|u| u.refresh());
+    };
+    show_op("last", "screen-1-1", "confirmed", true);
+    settle(1200);
+    assert!(!pending());
+    assert!(lit(), "the result stays lit when the cover lifts, not blanked at once");
+    settle(31_000);
+    assert!(!lit(), "the restarted window still blanks the screen after a full quiet stretch");
+}
+
 #[cfg(test)]
 #[test]
 fn wifi_channel_waits_for_live_readback_after_a_switch() {
