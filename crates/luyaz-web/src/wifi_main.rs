@@ -11,9 +11,13 @@
 //! - u60d's `clients.wifi`: the device count in the status.
 //! - The agent's `GET /api/wifi/status` with the tab's session (batch 1 `agent.rs`), only for what
 //!   u60d has no field for: the channel and width the radios really use (`actual_channel_*`,
-//!   `actual_bw_*`, from iw) and the devices per band (`clients_*`). Without them the page can't
-//!   say "switched on but not broadcasting". The reply also carries both passwords in plain text:
-//!   [`Live::of`] keeps only those six fields, nothing else is stored or rendered.
+//!   `actual_bw_*`, from iw), the devices per band (`clients_*`) and the transmit-power facts
+//!   (`txpower_2g` / `txpower_5g`, each `{percent, mbm, target_mbm}`: the saved percent, the
+//!   driver's stated limit while the band is up — a limit, not a measured power — and the power
+//!   the core verified it asked for; an older core sends no such keys and then no live reading is
+//!   shown at all). Without the channel fields the page can't say "switched on but not
+//!   broadcasting". The reply also carries both passwords in plain text: [`Live::of`] keeps only
+//!   those six fields plus the two txpower objects, nothing else is stored or rendered.
 //! - Power save: `GET /v2/api/wifi/power-save` supplies the chosen value (`preferred`) and the
 //!   driver read (`live`) separately. NFC comes from a current `nfc` block (`switch`); a write is
 //!   confirmed by a newer current read.
@@ -84,7 +88,13 @@ pub const CHANNELS_5G: [&str; 22] = [
     "132", "136", "140", "149", "153", "157", "161", "165",
 ];
 pub const HTMODES: [&str; 5] = ["auto", "HT20", "HT40", "VHT80", "VHT160"];
-pub const TXPOWERS: [&str; 3] = ["25", "50", "100"];
+
+/// The four transmit-power tiers as the strings the form and `/control` use, from the shared
+/// contract (`luyaz_api::wifi::TX_POWER_TIERS`). A stored value outside them is a legacy value:
+/// kept as it is, never rewritten by an unrelated edit, and the only write is a picked tier.
+fn tx_tiers() -> [String; 4] {
+    luyaz_api::wifi::TX_POWER_TIERS.map(|p| p.to_string())
+}
 pub const ENCS: [&str; 4] = ["psk2+ccmp", "psk3+ccmp", "psk2+psk3+ccmp", "none"];
 pub const REGIONS: [&str; 11] = [
     "CN", "US", "HK", "TW", "JP", "KR", "SG", "AU", "GB", "DE", "CA",
@@ -212,6 +222,39 @@ fn nfc(st: &St) -> Option<(bool, u64)> {
 
 // ---- what the agent says (tab's session) ----
 
+/// One band's transmit-power facts from the status's `txpower_2g` / `txpower_5g` object:
+/// `percent` is the saved preference (it may be off-tier), `mbm` the driver's stated power limit
+/// read back while the band is up, `target_mbm` the power the core verified it asked for. The
+/// fields are null when unknown; an absent object is an older core.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Tx {
+    pub percent: Option<u8>,
+    pub mbm: Option<i32>,
+    pub target_mbm: Option<i32>,
+}
+
+impl Tx {
+    /// None without the object (an older core): no live reading is fabricated then.
+    fn of(v: &Value) -> Option<Tx> {
+        v.as_object()?;
+        let num = |k: &str| match &v[k] {
+            Value::Number(n) => n.as_i64().and_then(|x| i32::try_from(x).ok()),
+            Value::String(s) => s.trim().parse().ok(),
+            _ => None,
+        };
+        let percent = match &v["percent"] {
+            Value::Number(n) => n.as_u64().and_then(|x| u8::try_from(x).ok()),
+            Value::String(s) => s.trim().parse().ok(),
+            _ => None,
+        };
+        Some(Tx {
+            percent,
+            mbm: num("mbm"),
+            target_mbm: num("target_mbm"),
+        })
+    }
+}
+
 /// The live radio state from the agent's `/api/wifi/status`: only these fields are kept (the reply
 /// also has both passwords in plain text).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -219,6 +262,8 @@ pub struct Live {
     pub ch: [String; 2],
     pub bw: [String; 2],
     pub n: [Option<i64>; 2],
+    /// Per band `txpower_2g` / `txpower_5g`; None = the reply has no such object (an older core).
+    pub tx: [Option<Tx>; 2],
 }
 
 impl Live {
@@ -232,6 +277,7 @@ impl Live {
             ch: [text(&v["actual_channel_2g"]), text(&v["actual_channel_5g"])],
             bw: [text(&v["actual_bw_2g"]), text(&v["actual_bw_5g"])],
             n: [n("clients_2g"), n("clients_5g")],
+            tx: [Tx::of(&v["txpower_2g"]), Tx::of(&v["txpower_5g"])],
         }
     }
 }
@@ -589,7 +635,7 @@ pub fn check(
             p.insert(format!("htmode_{x}"), json!(d.ht));
         }
         if d.tx != s.tx {
-            if !TXPOWERS.contains(&d.tx.as_str()) {
+            if !tx_tiers().contains(&d.tx) {
                 errs.push(err(l.pick("unknown transmit power", "不认识的发射功率")));
             }
             p.insert(format!("txpower_{x}"), json!(d.tx));
@@ -699,14 +745,54 @@ pub fn ht_label(l: Lang, h: &str) -> String {
     }
 }
 
-pub fn tx_label(l: Lang, t: &str) -> String {
+/// A saved transmit power as a percent: the tiers ("25"…"100") and legacy values alike ("80%").
+pub fn tx_label(t: &str) -> String {
     match t {
-        "25" => l.pick("Low", "低").into(),
-        "50" => l.pick("Medium", "中").into(),
-        "100" => l.pick("High", "高").into(),
         "" => "—".into(),
         o => format!("{o}%"),
     }
+}
+
+/// mBm as dBm ("19 dBm", "18.5 dBm").
+fn dbm(mbm: i32) -> String {
+    let v = mbm as f32 / 100.0;
+    if v.fract() == 0.0 {
+        format!("{} dBm", v as i32)
+    } else {
+        format!("{v:.1} dBm")
+    }
+}
+
+/// One band's transmit-power line: the saved percent first, then what the driver states while the
+/// band is up — a limit the driver reports, never a measured power — and, when the core's
+/// verified intent and the driver disagree, that is said rather than hidden. Without the status's
+/// txpower object (an older core) or with the band down, only the saved value shows: no live
+/// reading is guessed.
+fn tx_row(l: Lang, saved: &str, live: Option<(Option<Tx>, bool)>) -> String {
+    let (tx, up) = live.unwrap_or((None, false));
+    // the saved percent from the block; an unread block falls back to the status's saved percent
+    let saved = if saved.is_empty() {
+        tx.and_then(|t| t.percent.map(|p| p.to_string()))
+    } else {
+        Some(saved.to_owned())
+    };
+    let mut s = saved.as_deref().map_or_else(|| "—".into(), tx_label);
+    if let Some(t) = tx {
+        match t.mbm {
+            Some(m) => {
+                s.push_str(&format!("{}{}", l.pick(" · driver limit ", " · 驱动上限 "), dbm(m)));
+                if t.target_mbm.is_some_and(|want| want != m) {
+                    s.push_str(l.pick(
+                        " · differs from the intended power",
+                        " · 与目标功率不一致",
+                    ));
+                }
+            }
+            None if up => s.push_str(l.pick(" · driver readback missing", " · 驱动读数缺失")),
+            None => {}
+        }
+    }
+    s
 }
 
 pub fn region_label(l: Lang, c: &str) -> String {
@@ -1264,7 +1350,10 @@ pub fn view(st: &St, live: Option<&Live>, psm: Option<Psm>, l: Lang) -> View {
                         row(l.pick("Security", "加密方式"), enc_label(l, &b.encryption)),
                         row(l.pick("Channel", "信道"), ch_label(l, &b.channel)),
                         row(l.pick("Bandwidth", "带宽"), ht_label(l, &b.htmode)),
-                        row(l.pick("Transmit power", "发射功率"), tx_label(l, &b.txpower)),
+                        row(
+                            l.pick("Transmit power", "发射功率"),
+                            tx_row(l, &b.txpower, live.map(|v| (v.tx[i], !v.ch[i].is_empty()))),
+                        ),
                         row(
                             l.pick("Hide network name", "隐藏网络名称"),
                             if b.hidden { l.pick("Yes", "是") } else { l.pick("No", "否") }.into(),
@@ -1309,6 +1398,8 @@ pub struct Opt {
     pub value: String,
     pub label: String,
     pub sel: bool,
+    /// A non-selectable placeholder (a saved off-tier transmit power): shown, but not a choice.
+    pub dis: bool,
 }
 
 fn opts(list: &[&str], cur: &str, label: impl Fn(&str) -> String) -> Vec<Opt> {
@@ -1318,6 +1409,7 @@ fn opts(list: &[&str], cur: &str, label: impl Fn(&str) -> String) -> Vec<Opt> {
             value: (*x).into(),
             label: label(x),
             sel: *x == cur,
+            dis: false,
         })
         .collect();
     if !list.contains(&cur) {
@@ -1328,8 +1420,38 @@ fn opts(list: &[&str], cur: &str, label: impl Fn(&str) -> String) -> Vec<Opt> {
                 value: cur.into(),
                 label: if cur.is_empty() { "—".into() } else { label(cur) },
                 sel: true,
+                dis: false,
             },
         );
+    }
+    v
+}
+
+/// The transmit-power choices: exactly the four tiers, in the shared contract's order, labeled by
+/// percent. A stored off-tier (legacy) or unread value is not a fifth choice: it shows as a
+/// non-selectable placeholder at the top, selected — so an unrelated edit keeps it as it is, and
+/// a picked tier is the only thing this page ever writes.
+fn tx_opts(l: Lang, cur: &str) -> Vec<Opt> {
+    let mut v: Vec<Opt> = tx_tiers()
+        .iter()
+        .map(|t| Opt {
+            value: t.clone(),
+            label: tx_label(t),
+            sel: t == cur,
+            dis: false,
+        })
+        .collect();
+    if !v.iter().any(|o| o.sel) {
+        let label = if cur.is_empty() {
+            "—".into()
+        } else {
+            format!(
+                "{}{}",
+                tx_label(cur),
+                l.pick(" (saved legacy value)", "（旧档位，已保存）")
+            )
+        };
+        v.insert(0, Opt { value: cur.into(), label, sel: true, dis: true });
     }
     v
 }
@@ -1402,7 +1524,7 @@ fn form_leaves(open: bool, st: &St, l: Lang) -> String {
                         |c| ch_label(l, c),
                     ),
                     ht: opts(&HTMODES, &b.ht, |h| ht_label(l, h)),
-                    tx: opts(&TXPOWERS, &b.tx, |t| tx_label(l, t)),
+                    tx: tx_opts(l, &b.tx),
                 }
             })
             .collect();

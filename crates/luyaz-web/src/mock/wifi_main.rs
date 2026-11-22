@@ -145,6 +145,21 @@ fn wifi_master_mock_preserves_band_preferences_and_ap_settings() {
     assert_eq!(on["band_5g"], w["band_5g"]);
 }
 
+#[cfg(test)]
+#[test]
+fn wifi_mock_status_maps_saved_tiers_to_driver_limits() {
+    let w = defaults();
+    assert_eq!(tx(&w, "band_2g", true), json!({"percent": 100, "mbm": 1900, "target_mbm": 1900}));
+    assert_eq!(tx(&w, "band_5g", true)["mbm"], json!(1800));
+    let mut w2 = defaults();
+    w2["band_5g"]["txpower"] = json!("80");
+    assert_eq!(tx(&w2, "band_5g", true)["mbm"], json!(1700), "the legacy 80 maps to max − 1 dB");
+    assert_eq!(tx(&w, "band_2g", false), json!({"percent": 100, "mbm": null, "target_mbm": null}));
+    let mut w3 = defaults();
+    w3["band_2g"]["txpower"] = json!("");
+    assert_eq!(tx(&w3, "band_2g", true)["percent"], Value::Null);
+}
+
 fn publish_op(m: &Mock, active: Value, last: Value) {
     let cur = m.blocks.lock().unwrap().get("op").cloned();
     let (mut data, at) = match cur {
@@ -278,6 +293,27 @@ async fn power_save() -> axum::Json<Value> {
     }}))
 }
 
+/// The status's `txpower_<band>` object: the saved percent and — only while the band is up — the
+/// driver limit the mock firmware would state (2.4 GHz max 19 dBm, 5 GHz max 18 dBm; the stock
+/// map 25/50/75/80/100 → max − 6/3/2/1/0 dB), agreeing with the intended one.
+fn tx(w: &Value, band: &str, up: bool) -> Value {
+    let percent = w[band]["txpower"].as_str().unwrap_or("").parse::<u8>().ok();
+    let mbm = up.then(|| {
+        percent.map(|p| {
+            let max = if band == "band_2g" { 1900 } else { 1800 };
+            let off = match p {
+                25 => 600,
+                50 => 300,
+                75 => 200,
+                80 => 100,
+                _ => 0,
+            };
+            max - off
+        })
+    });
+    json!({"percent": percent, "mbm": mbm, "target_mbm": mbm})
+}
+
 async fn status(State(m): State<Arc<Mock>>) -> axum::Json<Value> {
     let w = current(&m);
     let up = |band: &str| {
@@ -290,6 +326,8 @@ async fn status(State(m): State<Arc<Mock>>) -> axum::Json<Value> {
         "actual_channel_5g": if up5 { "149" } else { "" },
         "actual_bw_5g": if up5 { "80 MHz" } else { "" },
         "clients_2g": u8::from(up2), "clients_5g": u8::from(up5),
+        "txpower_2g": tx(&w, "band_2g", up2),
+        "txpower_5g": tx(&w, "band_5g", up5),
     }}))
 }
 

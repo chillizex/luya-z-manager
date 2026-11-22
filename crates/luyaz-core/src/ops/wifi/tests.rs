@@ -435,13 +435,26 @@ fn guest_skips_a_missing_band() {
 #[test]
 fn txpower_alone_is_hot() {
     let m = uci();
-    let p = main_plan(&body(json!({"txpower_2g": "50", "txpower_5g": 80})), &m).unwrap();
-    let mut hot = p.hot_txpower().unwrap();
-    hot.sort();
-    assert_eq!(hot, vec![("wlan0", 50), ("wlan2", 80)]);
+    let p = main_plan(&body(json!({"txpower_2g": "50", "txpower_5g": 75})), &m).unwrap();
+    assert!(p.txpower_only());
+    assert_eq!(p.txpower_changed(), [true, true]);
+    assert_eq!(p.set_json(), json!({"wireless.wifi0.txpowerpercent":"50", "wireless.wifi1.txpowerpercent":"75"}));
     let p = main_plan(&body(json!({"txpower_2g": "50", "channel_2g": "6"})), &m).unwrap();
-    assert!(p.hot_txpower().is_none());
-    assert!(Plan::default().hot_txpower().is_none());
+    assert!(!p.txpower_only());
+    assert_eq!(p.txpower_changed(), [true, false]);
+}
+
+#[test]
+fn txpower_legacy_can_be_restored_but_is_not_a_new_choice() {
+    let m = uci();
+    let v = vault();
+    let now = value(Kind::Main, &m, &v).unwrap();
+    assert!(check_main(&json!({"txpower_5g": 80})).is_err());
+    assert!(check_main(&json!({"txpower_5g": "75"})).is_ok());
+    assert!(check_main(&json!({"txpower_2g": false})).is_err());
+    let prior = check_main(&json!({"restore":{"band_5g.txpower":"80"}})).unwrap();
+    let plan = plan_for(Kind::Main, prior.as_object().unwrap(), &m, &now, |_| None).unwrap();
+    assert_eq!(plan.set_json(), json!({"wireless.wifi1.txpowerpercent":"80"}));
 }
 
 #[test]

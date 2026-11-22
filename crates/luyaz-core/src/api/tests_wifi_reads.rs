@@ -23,8 +23,15 @@ fn stations_are_counted_by_line() {
 }
 
 #[test]
-fn status_has_exactly_the_six_fields_and_no_secret() {
-    let v = status_data([("6".into(), "20 MHz".into()), parse_info(INFO)], [1, 0]);
+fn status_separates_saved_and_observed_power_without_secrets() {
+    use crate::wifi_power::Reading;
+    let v = status_data(
+        [("6".into(), "20 MHz".into()), parse_info(INFO)],
+        [1, 0],
+        [Reading { percent: Some(75), ..Reading::default() }, Reading {
+            percent: Some(80), mbm: Some(1500), target_mbm: Some(1700),
+        }],
+    );
     let mut keys: Vec<_> = v.as_object().unwrap().keys().cloned().collect();
     keys.sort();
     assert_eq!(
@@ -35,7 +42,9 @@ fn status_has_exactly_the_six_fields_and_no_secret() {
             "actual_channel_2g",
             "actual_channel_5g",
             "clients_2g",
-            "clients_5g"
+            "clients_5g",
+            "txpower_2g",
+            "txpower_5g",
         ]
     );
     assert!(
@@ -45,6 +54,8 @@ fn status_has_exactly_the_six_fields_and_no_secret() {
     assert_eq!(v["actual_channel_5g"], "149");
     assert_eq!(v["clients_2g"], 1);
     assert_eq!(v["clients_5g"], json!(0));
+    assert_eq!(v["txpower_2g"], json!({"percent":75,"mbm":null,"target_mbm":null}));
+    assert_eq!(v["txpower_5g"], json!({"percent":80,"mbm":1500,"target_mbm":1700}));
 }
 
 #[test]

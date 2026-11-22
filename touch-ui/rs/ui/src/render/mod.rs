@@ -34,7 +34,7 @@ mod checks;
 
 use crate::conf::Conf;
 use crate::logic::{self, Launch};
-use crate::source::{self, Activity, NiAct, Polled, Source, WifiRead, WifiReply};
+use crate::source::{self, Activity, NiAct, Polled, Source, WifiRead, WifiReply, WifiTxPower};
 use crate::lv::{self, sys, Obj};
 use crate::ui::{self, Sub, SUBS, TABS};
 use checks::Checks;
@@ -465,7 +465,7 @@ impl Source for Replay {
         let mut flags = v.split(',').map(|x| x.trim() == "1");
         let up = [flags.next()?, flags.next()?];
         let on = up[0] || up[1];
-        Some(WifiRead { master: Some(on), radios: up.map(Some), power_save: flags.next(), module: Some(on), main: [Some(true); 2], up })
+        Some(WifiRead { master: Some(on), radios: up.map(Some), power_save: flags.next(), module: Some(on), main: [Some(true); 2], up, txpower: [WifiTxPower::default(); 2] })
     }
 
     fn wifi_reply(&self) -> Option<WifiReply> {
@@ -774,7 +774,7 @@ fn wifi_switch_waits_for_readback_and_blocks_touch() {
     init_render_test();
     let initial = WifiRead {
         master: Some(false), module: Some(false), radios: [Some(false), Some(true)],
-        main: [Some(true); 2], power_save: Some(true), up: [false; 2],
+        main: [Some(true); 2], power_save: Some(true), up: [false; 2], txpower: [WifiTxPower::default(); 2],
     };
     let wifi = Rc::new(RefCell::new(WifiTest { read: initial, ..WifiTest::default() }));
     let src = Box::new(Replay {
@@ -912,7 +912,7 @@ fn wifi_channel_waits_for_live_readback_after_a_switch() {
     init_render_test();
     let read = WifiRead {
         master: Some(true), module: Some(true), radios: [Some(false), Some(true)],
-        main: [Some(true); 2], power_save: None, up: [false, true],
+        main: [Some(true); 2], power_save: None, up: [false, true], txpower: [WifiTxPower::default(); 2],
     };
     let wifi = Rc::new(RefCell::new(WifiTest { read, ..WifiTest::default() }));
     let src = Box::new(Replay {
@@ -953,7 +953,7 @@ fn wifi_nfc_row_shows_only_a_live_known_value() {
     init_render_test();
     let initial = WifiRead {
         master: Some(true), module: Some(true), radios: [Some(true), Some(true)],
-        main: [Some(true); 2], power_save: Some(true), up: [true, true],
+        main: [Some(true); 2], power_save: Some(true), up: [true, true], txpower: [WifiTxPower::default(); 2],
     };
     let wifi = Rc::new(RefCell::new(WifiTest { read: initial, ..WifiTest::default() }));
     let src = Box::new(Replay {
@@ -1038,7 +1038,7 @@ fn wifi_power_save_confirms_on_the_fresh_saved_selection() {
     init_render_test();
     let initial = WifiRead {
         master: Some(true), module: Some(true), radios: [Some(true), Some(true)],
-        main: [Some(true); 2], power_save: Some(true), up: [true, true],
+        main: [Some(true); 2], power_save: Some(true), up: [true, true], txpower: [WifiTxPower::default(); 2],
     };
     let wifi = Rc::new(RefCell::new(WifiTest { read: initial, ..WifiTest::default() }));
     let src = Box::new(Replay {
@@ -1102,6 +1102,41 @@ fn wifi_power_save_confirms_on_the_fresh_saved_selection() {
 
 #[cfg(test)]
 #[test]
+fn wifi_txpower_choices_follow_core_by_band() {
+    if isolated_render("render::wifi_txpower_choices_follow_core_by_band", &["dark"]).is_none() {
+        return;
+    }
+    init_render_test();
+    let read = WifiRead {
+        master: Some(true), module: Some(true), radios: [Some(true), Some(true)],
+        main: [Some(true); 2], power_save: Some(true), up: [true, true],
+        txpower: [
+            WifiTxPower { percent: Some(50), mbm: Some(2300), target_mbm: Some(2400) },
+            WifiTxPower { percent: Some(75), mbm: None, target_mbm: Some(2700) },
+        ],
+    };
+    let wifi = Rc::new(RefCell::new(WifiTest { read, ..WifiTest::default() }));
+    let src = Box::new(Replay {
+        feed: BTreeMap::new(), step: Rc::new(RefCell::new(None)), cur: Rc::new(RefCell::new(String::new())),
+        next: None, wifi_test: Some(wifi),
+    });
+    let model = Model { bl_is_on: 1, bl_panel_lit: 1, bl_is_lit: 1, ..Model::default() };
+    ui::create(Conf::parse("appearance=dark\nautooff=0\n"), logic::launch_parse(&["luyaz-ui"]),
+        Rc::new(model), src, "luyaz-ui");
+    ui::with(|u| u.to_tab(ui::TAB_WIFI));
+    settle(1200);
+    ui::with(|u| {
+        assert_eq!(u.wifi.power_seg[0].sel, 1, "2.4 GHz must select the saved 50% tier");
+        assert_eq!(u.wifi.power_seg[1].sel, 2, "5 GHz must select the saved 75% tier");
+        assert!(u.wifi.power_st[0].text().windows(3).any(|w| w == b"50%"));
+        assert!(u.wifi.power_st[1].text().windows(3).any(|w| w == b"75%"));
+        assert!(u.wifi.power_st[0].text().windows(5).any(|w| w == b"23.00"));
+        assert!(u.wifi.power_st[1].text().windows(6).any(|w| w == "未知".as_bytes()));
+    });
+}
+
+#[cfg(test)]
+#[test]
 fn swipe_unlock_blocks_underlying_controls() {
     if isolated_render("render::swipe_unlock_blocks_underlying_controls", &["dark"]).is_none() {
         return;
@@ -1109,7 +1144,7 @@ fn swipe_unlock_blocks_underlying_controls() {
     init_render_test();
     let initial = WifiRead {
         master: Some(false), module: Some(false), radios: [Some(false), Some(true)],
-        main: [Some(true); 2], power_save: Some(true), up: [false; 2],
+        main: [Some(true); 2], power_save: Some(true), up: [false; 2], txpower: [WifiTxPower::default(); 2],
     };
     let wifi = Rc::new(RefCell::new(WifiTest { read: initial, ..WifiTest::default() }));
     let src = Box::new(Replay {

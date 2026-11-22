@@ -242,6 +242,16 @@ impl WifiReply {
 }
 
 #[derive(Clone, Copy, Default)]
+pub struct WifiTxPower {
+    /// Saved UCI preference. It may be a legacy value outside the four choices.
+    pub percent: Option<u8>,
+    /// Active driver readback in hundredths of a dBm, when the radio is available.
+    pub mbm: Option<i32>,
+    /// Expected active driver value for the saved preference.
+    pub target_mbm: Option<i32>,
+}
+
+#[derive(Clone, Copy, Default)]
 pub struct WifiRead {
     pub master: Option<bool>,
     pub radios: [Option<bool>; 2],
@@ -249,6 +259,7 @@ pub struct WifiRead {
     pub module: Option<bool>,
     pub main: [Option<bool>; 2],
     pub up: [bool; 2],
+    pub txpower: [WifiTxPower; 2],
 }
 
 #[cfg(test)]

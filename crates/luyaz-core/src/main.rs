@@ -104,6 +104,7 @@ mod state;
 mod ubus;
 #[allow(dead_code)]
 mod uci;
+mod wifi_power;
 
 use record::*;
 use std::collections::VecDeque;

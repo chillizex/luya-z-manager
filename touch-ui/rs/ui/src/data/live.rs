@@ -23,8 +23,9 @@ use super::screen_feed::{ScreenFeed, SfCfg};
 use super::ladder::Ladder;
 use super::speedtest::Speedtest;
 use super::util;
+use crate::json;
 use crate::logic::Launch;
-use crate::source::{Activity, NiAct, Polled, Source, WifiRead, WifiReply};
+use crate::source::{Activity, NiAct, Polled, Source, WifiRead, WifiReply, WifiTxPower};
 use ui_model::Model;
 use plat::backlight::Backlight;
 use plat::key::Key;
@@ -642,7 +643,35 @@ fn read_wifi() -> WifiRead {
         .and_then(|s| luyaz_wifi::psm::from_hotplug(&s));
     let live = saved.is_none().then(|| psm_live(read.up)).flatten();
     read.power_save = luyaz_wifi::psm::preferred(saved, live);
+    read.txpower = read_txpower();
     read
+}
+
+/// The power controls are deliberately read from Core's authenticated status path rather than
+/// inferred from UCI or from `iw` locally. The whole Wi-Fi sample is already a background task,
+/// so an unavailable Core response simply leaves both bands unknown and the controls disabled.
+fn read_txpower() -> [WifiTxPower; 2] {
+    const CAP: usize = 8192;
+    let (code, body) = CoreApi::default().http("GET", "/api/wifi/status", None, CAP, super::core_api::IO_MS);
+    let Some(body) = body.filter(|_| code == 200)
+        .and_then(|body| json::get(&body, "data", CAP)) else {
+        return [WifiTxPower::default(); 2];
+    };
+    ["txpower_2g", "txpower_5g"].map(|key| {
+        let Some(v) = json::get(&body, key, 1024) else { return WifiTxPower::default() };
+        WifiTxPower {
+            percent: json_num(&v, "percent").and_then(|n| u8::try_from(n).ok()),
+            mbm: json_num(&v, "mbm").and_then(|n| i32::try_from(n).ok()),
+            target_mbm: json_num(&v, "target_mbm").and_then(|n| i32::try_from(n).ok()),
+        }
+    })
+}
+
+fn json_num(obj: &[u8], key: &str) -> Option<i64> {
+    let v = json::get(obj, key, 64)?;
+    (v.as_slice() != b"null")
+        .then(|| String::from_utf8_lossy(&v).trim().parse().ok())
+        .flatten()
 }
 
 /// The driver's setting from the first interface that is up (a down wlan still answers).

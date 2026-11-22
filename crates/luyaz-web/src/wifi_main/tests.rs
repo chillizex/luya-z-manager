@@ -226,10 +226,22 @@ fn only_2g_off_with_5g_on_goes_to_the_dialog() {
 #[test]
 fn the_agent_reply_keeps_only_the_live_fields() {
     let v = json!({"key_2g": "secret-pass-1", "key_5g": "secret-pass-2", "actual_channel_2g": "6", "actual_bw_2g": "HT20",
-        "actual_channel_5g": "", "clients_2g": 2, "clients_5g": "1", "ssid_2g": "x"});
+        "actual_channel_5g": "", "clients_2g": 2, "clients_5g": "1", "ssid_2g": "x",
+        "txpower_2g": {"percent": 100, "mbm": 1900, "target_mbm": 1900},
+        "txpower_5g": {"percent": null, "mbm": null, "target_mbm": null}});
     let l = Live::of(&v);
     assert_eq!(l.ch, ["6".to_string(), String::new()]);
     assert_eq!(l.n, [Some(2), Some(1)]);
+    assert_eq!(l.tx, [
+        Some(Tx { percent: Some(100), mbm: Some(1900), target_mbm: Some(1900) }),
+        Some(Tx::default())
+    ]);
+    // an older core sends no txpower objects: no live reading is fabricated
+    let old = json!({"actual_channel_2g": "6", "clients_2g": 2});
+    assert_eq!(Live::of(&old).tx, [None, None]);
+    // numbers may come as strings
+    let s = Live::of(&json!({"txpower_2g": {"percent": "75", "mbm": "1700", "target_mbm": "1700"}}));
+    assert_eq!(s.tx[0], Some(Tx { percent: Some(75), mbm: Some(1700), target_mbm: Some(1700) }));
     assert!(!format!("{l:?}").contains("secret"));
 }
 
@@ -256,6 +268,7 @@ fn status_bands_and_the_last_change() {
         ch: ["6".into(), "149".into()],
         bw: ["HT20".into(), "VHT80".into()],
         n: [Some(1), Some(2)],
+        tx: [None, None],
     };
     let v = h.read(|st| view(st, Some(&live), None, Lang::Zh));
     assert_eq!((v.tone, v.state.as_str()), ("ok", "Wi-Fi 已开启"));
@@ -382,6 +395,92 @@ fn the_form_renders_seeded_and_never_with_a_password() {
     let h = hub_with(w, json!({}));
     let open = h.read(|st| form(true, st, Lang::En));
     assert!(open.contains("<option value=\"HE80\" selected>HE80</option>"));
+}
+
+#[test]
+fn four_tx_tiers_and_a_legacy_value_is_kept_not_a_fifth_choice() {
+    // the form offers exactly the shared contract's four tiers, labeled by percent
+    let h = hub_with(wifi_data(), json!({}));
+    let open = h.read(|st| form(true, st, Lang::En));
+    let sel = |sig: &str| {
+        let i = open.find(&format!("data-bind=\"{sig}\"")).expect("the select");
+        &open[i..i + open[i..].find("</select>").expect("its end")]
+    };
+    let (t2, t5) = (sel("_ft2"), sel("_ft5"));
+    for t in tx_tiers() {
+        assert!(t2.contains(&format!("<option value=\"{t}\"")), "2.4 GHz tier {t}");
+        assert!(t5.contains(&format!("<option value=\"{t}\"")), "5 GHz tier {t}");
+        assert!(
+            t2.contains(&format!(">{t}%</option>")) && t5.contains(&format!(">{t}%</option>")),
+            "tier {t} labeled by percent"
+        );
+    }
+    for (name, s) in [("2.4 GHz", t2), ("5 GHz", t5)] {
+        assert_eq!(s.matches("<option").count(), 4, "{name}: four choices, no placeholder");
+    }
+    assert!(t2.contains("<option value=\"100\" selected>100%</option>"), "the saved tier is selected");
+    // a stored off-tier value: a non-selectable placeholder, not a choice
+    let mut w = wifi_data();
+    w["band_5g"]["txpower"] = json!("80");
+    let cur = wifi_of(&w).unwrap();
+    let h = hub_with(w, json!({}));
+    let open = h.read(|st| form(true, st, Lang::Zh));
+    assert!(open.contains("<option value=\"80\" selected disabled>80%（旧档位，已保存）</option>"));
+    let s = Fields::seed(&cur);
+    // an unrelated edit keeps the legacy value: no txpower key is sent
+    let mut d = s.clone();
+    d.b[0].ssid = "Renamed".into();
+    let c = check(&s, &d, ["", ""], Some(&cur), Lang::Zh).unwrap();
+    assert_eq!(Value::Object(c.params.clone()), json!({"ssid_2g": "Renamed"}));
+    // picking a tier sends it, still hot (tier 2)
+    let mut d = s.clone();
+    d.b[1].tx = "75".into();
+    let c = check(&s, &d, ["", ""], Some(&cur), Lang::Zh).unwrap();
+    assert_eq!(c.params["txpower_5g"], json!("75"));
+    assert!(c.txpower_only());
+    assert_eq!(confirm(&c, Lang::Zh).tier, write::Tier::Inline);
+    // an off-tier pick is refused
+    let mut d = s.clone();
+    d.b[1].tx = "60".into();
+    assert!(check(&s, &d, ["", ""], Some(&cur), Lang::En)
+        .unwrap_err()
+        .text(Lang::En)
+        .contains("unknown transmit power"));
+}
+
+#[test]
+fn transmit_power_row_shows_saved_and_driver_truthfully() {
+    let h = hub_with(wifi_data(), json!({})); // saved "100" on both bands
+    let mut live = Live { ch: ["6".into(), "149".into()], ..Live::default() };
+    // an older core (no txpower objects): only the saved percent, nothing guessed
+    let v = h.read(|st| view(st, Some(&live), None, Lang::En));
+    assert_eq!(v.bands[0].rows[6].value, "100%");
+    // the driver's stated limit while the band is up, agreeing with the verified intent
+    live.tx = [
+        Some(Tx { percent: Some(100), mbm: Some(1900), target_mbm: Some(1900) }),
+        Some(Tx { percent: Some(100), mbm: Some(1850), target_mbm: Some(1850) }),
+    ];
+    let v = h.read(|st| view(st, Some(&live), None, Lang::En));
+    assert_eq!(v.bands[0].rows[6].value, "100% · driver limit 19 dBm");
+    assert_eq!(v.bands[1].rows[6].value, "100% · driver limit 18.5 dBm");
+    // the driver disagrees with the verified intent: said, not hidden
+    live.tx[1] = Some(Tx { percent: Some(50), mbm: Some(2100), target_mbm: Some(1500) });
+    let v = h.read(|st| view(st, Some(&live), None, Lang::Zh));
+    assert_eq!(v.bands[1].rows[6].value, "100% · 驱动上限 21 dBm · 与目标功率不一致");
+    // the band is up but the driver gave no reading: missing, not guessed
+    live.tx[0] = Some(Tx::default());
+    let v = h.read(|st| view(st, Some(&live), None, Lang::En));
+    assert_eq!(v.bands[0].rows[6].value, "100% · driver readback missing");
+    // the band is down: no live line at all
+    let down = Live { ch: [String::new(), "149".into()], tx: [Some(Tx::default()), None], ..Live::default() };
+    let v = h.read(|st| view(st, Some(&down), None, Lang::En));
+    assert_eq!(v.bands[0].rows[6].value, "100%");
+    // a legacy saved value shows its own percent
+    let mut w = wifi_data();
+    w["band_2g"]["txpower"] = json!("80");
+    let h = hub_with(w, json!({}));
+    let v = h.read(|st| view(st, Some(&down), None, Lang::En));
+    assert_eq!(v.bands[0].rows[6].value, "80%");
 }
 
 #[test]

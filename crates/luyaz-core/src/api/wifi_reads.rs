@@ -1,4 +1,4 @@
-//! Live Wi-Fi values moved from the agent: actual channel/width and stations per band (only those six, never a key), power save.
+//! Live Wi-Fi channel, width, client counts, transmit power and power save. No Wi-Fi keys.
 //!
 //! u60-web.md 8d-1b: the agent's reads luyaz-web still used, served here at the agent's path with
 //! the agent's reply shape (`{ok, data}`), so luyaz-web only changes where it asks. On demand,
@@ -11,6 +11,7 @@ use luyaz_wifi::psm;
 use serde_json::{Value, json};
 
 use super::{Compat, reply};
+use crate::wifi_power::{self, Reading};
 
 const DEADLINE: Duration = Duration::from_secs(3);
 /// The agent's interface per band: wlan0 = 2.4 GHz, wlan2 = 5 GHz (MU5250).
@@ -55,8 +56,7 @@ async fn iw(args: &[&str]) -> String {
     }
 }
 
-/// Exactly six fields: the agent's reply also carries both Wi-Fi keys, which no page here shows.
-pub(super) fn status_data(info: [(String, String); 2], clients: [u64; 2]) -> Value {
+pub(super) fn status_data(info: [(String, String); 2], clients: [u64; 2], power: [Reading; 2]) -> Value {
     json!({
         "actual_channel_2g": info[0].0,
         "actual_bw_2g": info[0].1,
@@ -64,6 +64,8 @@ pub(super) fn status_data(info: [(String, String); 2], clients: [u64; 2]) -> Val
         "actual_bw_5g": info[1].1,
         "clients_2g": clients[0],
         "clients_5g": clients[1],
+        "txpower_2g": power[0],
+        "txpower_5g": power[1],
     })
 }
 
@@ -75,10 +77,12 @@ pub async fn status(State(_c): State<Compat>) -> Response {
         iw(&[IF_2G, "station", "dump"]),
         iw(&[IF_5G, "station", "dump"]),
     );
-    let data = status_data(
-        [parse_info(&i2), parse_info(&i5)],
-        [count_stations(&s2), count_stations(&s5)],
-    );
+    let info = [parse_info(&i2), parse_info(&i5)];
+    let power = crate::state::blocking(move || {
+        let cfg = crate::state::wifi_map_sync();
+        wifi_power::readings(cfg.as_ref(), [&i2, &i5], psm::main_up())
+    }).await;
+    let data = status_data(info, [count_stations(&s2), count_stations(&s5)], power);
     reply(200, json!({"ok": true, "data": data}))
 }
 

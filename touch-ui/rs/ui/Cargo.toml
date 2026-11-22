@@ -15,5 +15,6 @@ lvgl-sys = { path = "../lvgl-sys" }
 plat = { path = "../plat" }
 ui-model = { path = "../ui-model" }
 luyaz-wifi = { path = "../../../crates/luyaz-wifi" }
+luyaz-api = { path = "../../../crates/luyaz-api" }
 libc = "0.2"
 mimalloc = { version = "0.1", default-features = false }

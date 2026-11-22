@@ -4,6 +4,8 @@
 
 use serde_json::{Map, Value, json};
 
+pub const TX_POWER_TIERS: [u8; 4] = [25, 50, 75, 100];
+
 /// Drop the characters a uci value never needs and a shell would read.
 pub fn sanitize_uci_value(v: &str) -> String {
     v.chars()

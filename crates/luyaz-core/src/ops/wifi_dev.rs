@@ -29,7 +29,6 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
 };
 
 /// 请求参数里的 Wi-Fi 锁交接号（`/control` 加的，只在内存里）。
@@ -344,8 +343,9 @@ impl WifiDev {
         }
         let switches = luyaz_wifi::switches::read(|k| m.get(k).map(String::as_str));
         let module_on = plan.vendor.or(switches.module) == Some(true);
-        let hot = module_on.then(|| plan.hot_txpower()).flatten();
-        let reload = module_on && hot.is_none() && !plan.set.is_empty();
+        let power_only = plan.txpower_only();
+        let reload = module_on && !power_only && !plan.set.is_empty();
+        let power_bands = if reload || plan.vendor == Some(true) { [true; 2] } else { plan.txpower_changed() };
         let expected = reload.then(|| wifi::simulate(&m, &plan));
         let (set, vendor, guest) = (plan.set_json(), plan.vendor, kind == Kind::Guest);
         // D7：拿不到写锁就什么都不写（Wi-Fi 锁已经拿着，lk 随返回放掉）
@@ -364,15 +364,7 @@ impl WifiDev {
             *guard(&self.verify) = Verify::Done(false);
             fail(e)
         })?;
-        if let Some(tx) = hot {
-            // agent：只改发射功率时 iw 热改（limit = 百分比 × 30），不重载
-            for (iface, pct) in tx {
-                let limit = (pct * 30).to_string();
-                let args = ["dev", iface, "set", "txpower", "limit", limit.as_str()];
-                if let Err(e) = crate::command::run("iw", args, Duration::from_secs(5)).await {
-                    eprintln!("ops: iw txpower on {iface}: {e}");
-                }
-            }
+        if power_only && module_on {
             out["hot"] = json!(true);
         }
         *guard(&self.verify) = Verify::Running;
@@ -386,7 +378,7 @@ impl WifiDev {
                     handle: handle.clone(),
                     exec: exec.clone(),
                 };
-                let data = if let Some(expected) = &expected {
+                let mut data = if let Some(expected) = &expected {
                     let error = luyaz_wifi::reload(&host, &lk).err();
                     let mut data = luyaz_wifi::verify_written(&UciHost, expected);
                     if let Some(e) = error {
@@ -395,9 +387,21 @@ impl WifiDev {
                     data
                 } else if let Some(wanted) = vendor {
                     luyaz_wifi::verify_master(&UciHost, wanted, switches.radios)
+                } else if power_only {
+                    // This did not change the AP layout. The operation still verifies saved values.
+                    json!({"verified": true})
                 } else {
                     luyaz_wifi::verify_no_reload(&UciHost)
                 };
+                if module_on && power_bands.contains(&true) {
+                    let result = crate::state::wifi_map_sync()
+                        .ok_or_else(|| "cannot read Wi-Fi power settings".to_owned())
+                        .and_then(|cfg| crate::wifi_power::apply(&cfg, power_bands, &lk));
+                    if let Err(e) = result {
+                        data["verified"] = json!(false);
+                        data["power_error"] = json!(e);
+                    }
+                }
                 let ok = data["verified"].as_bool() == Some(true);
                 eprintln!("ops: Wi-Fi change: reload finished {data}");
                 *guard(&verify) = Verify::Done(ok);

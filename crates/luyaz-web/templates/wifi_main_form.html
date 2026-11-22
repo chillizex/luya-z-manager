@@ -5,7 +5,7 @@
 <button type="button" role="switch" class="nd-switch t-switch" aria-labelledby="{{ lid }}" aria-checked="{{ on }}"{% if on %} data-selected="true"{% endif %}{% if !enabled %} disabled{% endif %} data-attr:disabled="!$_gon || !$_gmodule || !$_fon" data-attr:aria-checked="${{ sig }} ? 'true' : 'false'" data-attr:data-selected="${{ sig }}" data-on:click="${{ sig }} = !${{ sig }}"><span class="nd-switch__track"><svg class="nd-switch__check" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6.2 5 8.6 9.5 3.6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="nd-switch__thumb"></span></span></button>
 {%- endmacro -%}
 {%- macro sel(sig, label, os) -%}
-<label class="grid gap-1"><span class="nd-aux">{{ label }}</span><select class="nd-field" data-bind="{{ sig }}">{% for o in os.iter() %}<option value="{{ o.value }}"{% if o.sel %} selected{% endif %}>{{ o.label }}</option>{% endfor %}</select></label>
+<label class="grid gap-1"><span class="nd-aux">{{ label }}</span><select class="nd-field" data-bind="{{ sig }}">{% for o in os.iter() %}<option value="{{ o.value }}"{% if o.sel %} selected{% endif %}{% if o.dis %} disabled{% endif %}>{{ o.label }}</option>{% endfor %}</select></label>
 {%- endmacro -%}
 <button id="wf-editbtn" type="button" class="nd-btn nd-btn--secondary nd-btn--sm" aria-expanded="{{ open }}" aria-controls="wf-form" data-on:click="@post('/router/wifi/{% if open %}close{% else %}form{% endif %}')">{% if open %}{{ l.pick("Cancel", "取消") }}{% else %}{{ l.pick("Change settings", "更改设置") }}{% endif %}</button>
 <!--leaf-->
@@ -26,5 +26,5 @@
 {% call sel(b.sig("t"), b.lab(l, "transmit power", "发射功率"), b.tx) %}{% endcall %}
 <div class="flex items-center gap-3 wf-span"><span class="nd-body flex-1" id="wf-fx{{ b.s }}-l">{{ b.title }} {{ l.pick("hide network name", "隐藏网络名称") }}</span>{% call sw(b.sig("x"), b.lid("x"), b.hidden) %}{% endcall %}</div>
 </div></section>{% endfor %}
-<div class="flex flex-wrap gap-3"><button type="button" class="nd-btn nd-btn--primary" data-on:click="@post('/router/wifi/main/ask', {filterSignals: {include: /^_[fg]/, exclude: /(?!)/}})">{{ l.pick("Apply", "应用") }}</button><button type="button" class="nd-btn nd-btn--secondary" data-on:click="@post('/router/wifi/close')">{{ l.pick("Discard changes", "放弃改动") }}</button></div>
+<div class="flex flex-wrap gap-3"><button id="wf-main-apply" type="button" class="nd-btn nd-btn--primary" data-on:click="@post('/router/wifi/main/ask', {filterSignals: {include: /^_[fg]/, exclude: /(?!)/}})">{{ l.pick("Apply", "应用") }}</button><button type="button" class="nd-btn nd-btn--secondary" data-on:click="@post('/router/wifi/close')">{{ l.pick("Discard changes", "放弃改动") }}</button></div>
 </div>{% else %}<span hidden data-init="$_wfo = false"></span>{% endif %}</div>

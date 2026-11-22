@@ -8,8 +8,9 @@ use super::{Ui, VIEW_H};
 use crate::kit::{self, CARD_W, H, MARGIN, PAD, ROW_H, W};
 use crate::lang::{n_, tr};
 use crate::lv::{self, sys, Obj};
-use crate::source::{WifiRead, WifiReply};
+use crate::source::{WifiRead, WifiReply, WifiTxPower};
 use crate::theme::{t, uf};
+use luyaz_api::wifi::TX_POWER_TIERS;
 
 const WSW_MASTER: usize = 0;
 const WSW_24: usize = 1;
@@ -19,7 +20,6 @@ const WSW_NFC: usize = 4;
 const WIFI_READ_MS: u32 = 5_000;
 const WIFI_WRITE_MS: u32 = 75_000;
 const WIFI_TXN_MS: u32 = 145_000;
-
 #[derive(Default, Clone)]
 pub struct Wifi {
     pub scroll: Obj,
@@ -31,6 +31,8 @@ pub struct Wifi {
     pub ch5: Obj,
     pub sw: [Obj; 5],
     pub sw_st: [Obj; 5],
+    pub power_seg: [kit::Seg; 2],
+    pub power_st: [Obj; 2],
     pub cli_sec: Obj,
     pub cli_n: Obj,
     pub cli_card: Obj,
@@ -52,6 +54,7 @@ pub struct Wifi {
     pub pool: Obj,
     pub lease: Obj,
     settings: [Option<bool>; 4],
+    txpower: [WifiTxPower; 2],
     checked: [bool; 4],
     /// the NFC row's last concrete value; None until one arrives
     nfc: Option<bool>,
@@ -61,6 +64,7 @@ pub struct Wifi {
     pub(super) up: Option<[bool; 2]>,
     read_at: Option<u32>,
     write: Option<WifiWrite>,
+    power_write: Option<WifiPowerWrite>,
     eat_touch: bool,
     warn_at: Option<u32>,
     cover: Obj,
@@ -76,10 +80,19 @@ struct WifiWrite {
     radios_before: [Option<bool>; 2],
 }
 
+#[derive(Clone, Copy)]
+struct WifiPowerWrite {
+    band: usize,
+    percent: u8,
+    started: u32,
+    verdict: Option<WifiReply>,
+}
+
 impl Wifi {
     fn update_settings(&mut self, read: WifiRead) {
         self.settings = read.settings();
         self.module = read.module;
+        self.txpower = read.txpower;
         for (cached, value) in self.checked.iter_mut().zip(self.settings) {
             if let Some(value) = value {
                 *cached = value;
@@ -96,6 +109,10 @@ impl Wifi {
             WSW_PSM => true,
             _ => false,
         }
+    }
+
+    fn txpower_enabled(&self, band: usize) -> bool {
+        self.txpower.get(band).is_some_and(|p| p.percent.is_some())
     }
 }
 
@@ -131,12 +148,58 @@ impl WifiRead {
             _ => false,
         })
     }
+
+    fn confirms_txpower(self, write: WifiPowerWrite) -> bool {
+        let power = self.txpower[write.band];
+        if power.percent != Some(write.percent) {
+            return false;
+        }
+        // A saved preference is enough while the live AP interface is down. Once it is up, only
+        // matching driver and target readbacks count as applied.
+        if self.up[write.band] {
+            power.mbm.zip(power.target_mbm).is_some_and(|(actual, target)| actual == target)
+        } else {
+            true
+        }
+    }
+}
+
+fn dbm(mbm: i32) -> String {
+    let sign = if mbm < 0 { "-" } else { "" };
+    let n = mbm.unsigned_abs();
+    format!("{sign}{}.{:02} dBm", n / 100, n % 100)
+}
+
+fn power_status(power: WifiTxPower, active: Option<bool>) -> String {
+    let saved = match power.percent {
+        Some(p) if TX_POWER_TIERS.contains(&p) => format!("{} {p}%", tr("保存")),
+        Some(p) => format!("{} {p}%（{}）", tr("保存"), tr("旧值")),
+        None => format!("{}{}", tr("保存"), tr("未知")),
+    };
+    let driver = match active {
+        Some(false) => tr("射频关闭").into(),
+        Some(true) => power.mbm.map(|v| format!("{} {}", tr("驱动读回"), dbm(v))).unwrap_or_else(|| format!("{}{}", tr("驱动读回"), tr("未知"))),
+        None => tr("不可用").into(),
+    };
+    let target = power.target_mbm.map(|v| format!("{} {}", tr("目标"), dbm(v))).unwrap_or_else(|| format!("{}{}", tr("目标"), tr("未知")));
+    format!("{saved} · {driver} · {target}")
 }
 
 unsafe extern "C" fn wifi_sw_cb(e: *mut sys::lv_event_t) {
     // SAFETY: LVGL's event
     let (id, sw) = unsafe { (lv::event_user(e), lv::event_target(e)) };
     super::with(|u| u.wifi_sw(id, sw.has_state(lv::LV_STATE_CHECKED)));
+}
+
+unsafe extern "C" fn wifi_power_cb(e: *mut sys::lv_event_t) {
+    // SAFETY: LVGL's event
+    let target = unsafe { lv::event_target(e) };
+    super::with(|u| {
+        let Some((band, tier)) = u.wifi.power_seg.iter().enumerate().find_map(|(band, seg)| {
+            seg.item.iter().position(|&item| item == target).map(|tier| (band, tier))
+        }) else { return };
+        u.wifi_power(band, tier);
+    });
 }
 
 impl Ui {
@@ -193,8 +256,38 @@ impl Ui {
         }
     }
 
+    fn wifi_power(&mut self, band: usize, tier: usize) {
+        if tier >= TX_POWER_TIERS.len() || self.wifi_busy() || !self.wifi.txpower_enabled(band) {
+            return;
+        }
+        let percent = TX_POWER_TIERS[tier];
+        if self.wifi.txpower[band].percent == Some(percent) {
+            return;
+        }
+        self.wifi.power_write = Some(WifiPowerWrite {
+            band, percent, started: lv::tick_get(), verdict: None,
+        });
+        self.wifi.warn_at = None;
+        self.wifi.cover_title.set_text(tr("正在设置发射功率…"));
+        self.wifi.cover.move_foreground();
+        kit::show(self.wifi.cover, true);
+        let key = ["txpower_2g", "txpower_5g"][band];
+        let expect_key = ["band_2g.txpower", "band_5g.txpower"][band];
+        let old = self.wifi.txpower[band].percent.expect("txpower_enabled checked");
+        let params = format!(
+            "{{\"{key}\":\"{percent}\",\"expect\":{{\"{expect_key}\":\"{old}\"}}}}"
+        );
+        // Transmit power has no emergency path: the saved preference and active driver must be
+        // confirmed through Core's transaction/readback flow.
+        if !self.data_control("wifi.settings", &params, None) {
+            self.wifi.power_write = None;
+            self.wifi.warn_at = Some(lv::tick_get());
+            kit::show(self.wifi.cover, false);
+        }
+    }
+
     pub(super) fn wifi_busy(&self) -> bool {
-        self.wifi.write.is_some()
+        self.wifi.write.is_some() || self.wifi.power_write.is_some()
     }
 
     pub(super) fn wifi_blocks_touch(&mut self, pressed: bool) -> bool {
@@ -217,7 +310,43 @@ impl Ui {
             self.wifi.nfc_checked = on;
         }
         let now = lv::tick_get();
-        if let Some(mut write) = self.wifi.write {
+        if let Some(mut write) = self.wifi.power_write {
+            let op_id = self.src.wifi_op_id();
+            let timed_out = now.wrapping_sub(write.started) >= WIFI_TXN_MS;
+            let verdict = write.verdict
+                .or_else(|| self.src.wifi_reply())
+                .or_else(|| {
+                    let id = op_id?;
+                    let view = &self.op.view;
+                    WifiReply::from_op(&view.active, id).or_else(|| WifiReply::from_op(&view.last, id))
+                })
+                .or_else(|| timed_out.then_some(WifiReply::Failed));
+            if let Some(verdict) = verdict {
+                let read = self.src.wifi_read(write.verdict.is_none());
+                write.verdict = Some(verdict);
+                let confirmed = read.is_some_and(|r| match verdict {
+                    WifiReply::CoreDone => r.confirms_txpower(write),
+                    // There is intentionally no emergency transmit-power path.
+                    WifiReply::EmergencyDone | WifiReply::Failed => false,
+                });
+                if timed_out || confirmed || (verdict == WifiReply::Failed && read.is_some()) {
+                    let w = &mut self.wifi;
+                    if let Some(read) = read {
+                        w.update_settings(read);
+                    } else {
+                        w.txpower = [WifiTxPower::default(); 2];
+                    }
+                    w.read_at = None;
+                    if timed_out || !confirmed {
+                        w.warn_at = Some(now);
+                    }
+                    w.power_write = None;
+                    kit::show(w.cover, false);
+                } else {
+                    self.wifi.power_write = Some(write);
+                }
+            }
+        } else if let Some(mut write) = self.wifi.write {
             let op_id = self.src.wifi_op_id().filter(|_| write.id != WSW_PSM);
             let limit = if op_id.is_some() { WIFI_TXN_MS } else { WIFI_WRITE_MS };
             let timed_out = now.wrapping_sub(write.started) >= limit;
@@ -247,6 +376,7 @@ impl Ui {
                         w.settings = [None; 4];
                         w.module = None;
                         w.up = None;
+                        w.txpower = [WifiTxPower::default(); 2];
                     }
                     w.read_at = None;
                     if timed_out || !confirmed {
@@ -288,6 +418,56 @@ impl Ui {
                 }
             }
         }
+        let power = self.wifi.txpower;
+        let power_busy = self.wifi_busy();
+        for band in 0..2 {
+            let selected = power[band].percent
+                .and_then(|p| TX_POWER_TIERS.iter().position(|&tier| tier == p))
+                .map_or(-1, |i| i as i32);
+            let disabled = power_busy || power[band].percent.is_none();
+            {
+                let seg = &mut self.wifi.power_seg[band];
+                kit::seg_set(seg, selected);
+                if disabled {
+                    seg.obj.add_state(lv::LV_STATE_DISABLED);
+                } else {
+                    seg.obj.remove_state(lv::LV_STATE_DISABLED);
+                }
+                for &item in &seg.item {
+                    if disabled {
+                        item.add_state(lv::LV_STATE_DISABLED);
+                    } else {
+                        item.remove_state(lv::LV_STATE_DISABLED);
+                    }
+                }
+            }
+            let active = self.wifi.module.zip(self.wifi.settings[WSW_24 + band]).map(|(module, radio)| module && radio);
+            self.set(self.wifi.power_st[band], power_status(power[band], active));
+        }
+    }
+
+    fn build_wifi_power(w: &mut Wifi, sc: Obj, y: &mut i32) {
+        kit::section(sc, *y, tr("发射功率"));
+        *y += 20;
+        const BAND_NAMES: [&str; 2] = [n_("2.4 GHz"), n_("5 GHz")];
+        const POWER_LABELS: [&str; 4] = ["25%", "50%", "75%", "100%"];
+        const BAND_H: i32 = 96;
+        let card = kit::card(sc, MARGIN, *y, CARD_W, 2 * BAND_H);
+        for band in 0..2 {
+            let by = band as i32 * BAND_H;
+            if band > 0 {
+                kit::sep(card, by);
+            }
+            kit::label(card, uf().cj13, t().t1, PAD, by + 7, tr(BAND_NAMES[band]));
+            w.power_seg[band] = kit::seg(
+                card, PAD, by + 27, CARD_W - 2 * PAD, &POWER_LABELS, Some(wifi_power_cb),
+            );
+            w.power_st[band] = kit::label_w(
+                card, uf().cj12, t().t3, PAD, by + 59, CARD_W - 2 * PAD, true, "—",
+            );
+            w.power_st[band].set_height(32);
+        }
+        *y += 2 * BAND_H + 10;
     }
 
     #[allow(clippy::needless_range_loop)]
@@ -328,6 +508,8 @@ impl Ui {
         w.cover_title = title;
         kit::show(cover, false);
         y += 5 * ROW_H + 10;
+
+        Self::build_wifi_power(w, sc, &mut y);
 
         w.cli_sec = kit::section(sc, y, tr("已连接设备"));
         w.cli_n = kit::label_r(sc, f.cj12, th.t3, W - MARGIN - 6, y, "");

@@ -66,7 +66,7 @@ async function own(p) {
     await p.click("#wf-editbtn");
     await p.waitForSelector("input[data-bind=_fs2]", { timeout: 8000 });
   };
-  const apply = () => p.click("#wf-form button:has-text('应用')");
+  const apply = () => p.click("#wf-main-apply");
   const noKey = async (what) => ok(!(await p.content()).includes(AGENT_KEY), `${what}: the agent's password is not in the page`);
 
   const st = await txt(p, "#wf-status");
@@ -139,6 +139,30 @@ async function own(p) {
   await inline().click();
   await done("设置已生效|没有生效|设备已接受");
   ok(await txt(p, "#wf-main-op") === "Wi-Fi 设置已生效" && same((await lastOp()).params, { txpower_5g: "50" }), `txpower: ${await txt(p, "#wf-main-op")}`);
+
+  // cross-read: the band row shows the saved tier together with the driver's stated limit (the
+  // mock maps 50 → max − 3 dB: 5 GHz 15 dBm); the live half arrives with the agent's next poll
+  await until(p, () => /50% · 驱动上限 15 dBm/.test(document.querySelector("#wf-bands")?.textContent ?? ""), null, 45000);
+  ok(/50% · 驱动上限 15 dBm/.test(await txt(p, "#wf-bands")), "band row: the saved tier with the driver's stated limit");
+  // the form offers exactly the four tiers, percent-labeled; nothing else selectable
+  await open();
+  {
+    const vals = await p.locator("select[data-bind=_ft5] option").evaluateAll((os) => os.map((o) => `${o.value}${o.disabled ? "!" : ""}`));
+    ok(vals.join(",") === "25,50,75,100", `four tier choices (${vals})`);
+  }
+  // a stored off-tier value: one disabled placeholder, and an unrelated edit keeps it as it is
+  await p.click("#wf-editbtn"); // discard
+  await p.waitForSelector("input[data-bind=_fs2]", { state: "detached", timeout: 8000 }).catch(() => {});
+  await post("/mock/wifi", { set: { band_5g: { ap_on: true, radio_on: true, ssid: "U60-Home-5G", encryption: "psk2+psk3+ccmp", has_password: true, hidden: false, channel: "149", txpower: "80", htmode: "VHT80" } } });
+  await open();
+  const ph = p.locator('select[data-bind=_ft5] option[value="80"]');
+  ok((await ph.count()) === 1 && (await ph.isDisabled()) && (await ph.textContent()) === "80%（旧档位，已保存）", "legacy: a non-selectable placeholder, not a fifth choice");
+  await p.fill("input[data-bind=_fs2]", "U60-Keep");
+  await apply();
+  await dialog().waitFor({ timeout: 8000 }).catch(() => {});
+  await p.click("dialog#wf-main-confirm .nd-btn--confirm");
+  await done("设置已生效|没有生效|设备已接受");
+  ok(same((await lastOp()).params, { ssid_2g: "U60-Keep" }), `legacy kept by an unrelated edit (${JSON.stringify((await lastOp()).params)})`);
 
   // a new 5 GHz password: sent once in the body, never in the page
   await open();
@@ -246,7 +270,7 @@ async function remote(browser) {
     await p.click("#wf-editbtn");
     await p.waitForSelector("input[data-bind=_fs2]", { timeout: 8000 });
     await p.fill("input[data-bind=_fs2]", ssid);
-    await p.click("#wf-form button:has-text('应用')");
+    await p.click("#wf-main-apply");
     await p.locator("dialog#wf-main-confirm[open]").waitFor({ timeout: 8000 }).catch(() => {});
     const dlg = await txt(p, "dialog#wf-main-confirm");
     await p.click("dialog#wf-main-confirm .nd-btn--confirm");

@@ -32,10 +32,10 @@ const BANDS_REQUIRE_ON: &str = "turn Wi-Fi on before changing its bands";
 const SEPARATE_SWITCH_AND_BANDS: &str = "apply the Wi-Fi switch and band changes separately";
 const CONTRADICTORY_SWITCH: &str = "cannot restore contradictory Wi-Fi switch values";
 
-/// 两个频段：值里的前缀、主网络的 AP 节、radio 节、接口（txpower 热改用）。
-const BANDS: [(&str, &str, &str, &str); 2] = [
-    ("band_2g", "main_2g", "wifi0", "wlan0"),
-    ("band_5g", "main_5g", "wifi1", "wlan2"),
+/// 两个频段：值里的前缀、主网络的 AP 节、radio 节。
+const BANDS: [(&str, &str, &str); 2] = [
+    ("band_2g", "main_2g", "wifi0"),
+    ("band_5g", "main_5g", "wifi1"),
 ];
 /// Saved radio switches, in the same band order as `Switches::radios`.
 const RADIO_SWITCHES: [(&str, &str, &str); 2] = [
@@ -141,21 +141,13 @@ impl Plan {
         self.set.is_empty() && self.vendor.is_none()
     }
 
-    /// 只改了发射功率：agent 用 iw 热改、不重载。返回要热改的 (接口, 百分比)。
-    pub fn hot_txpower(&self) -> Option<Vec<(&'static str, u32)>> {
-        if self.vendor.is_some() || self.set.is_empty() {
-            return None;
-        }
-        self.set
-            .iter()
-            .map(|(p, v)| {
-                let iface = BANDS
-                    .iter()
-                    .find(|(_, _, radio, _)| *p == format!("wireless.{radio}.txpowerpercent"))?
-                    .3;
-                v.parse().ok().map(|n| (iface, n))
-            })
-            .collect()
+    pub fn txpower_only(&self) -> bool {
+        self.vendor.is_none() && !self.set.is_empty()
+            && self.set.iter().all(|(path, _)| crate::wifi_power::PREF.contains(&path.as_str()))
+    }
+
+    pub fn txpower_changed(&self) -> [bool; 2] {
+        crate::wifi_power::PREF.map(|key| self.set.iter().any(|(path, _)| path == key))
     }
 
     /// `wifi.apply` 的 `set`。
@@ -235,6 +227,15 @@ fn check_value(name: &str, v: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn check_power_tier(name: &str, value: &Value) -> Result<(), String> {
+    let valid = luyaz_api::wifi::TX_POWER_TIERS.into_iter().any(|tier| match value {
+        Value::Number(n) => n.as_u64() == Some(u64::from(tier)),
+        Value::String(s) => s.parse() == Ok(tier) && !s.starts_with(['0', '+']),
+        _ => false,
+    });
+    valid.then_some(()).ok_or_else(|| format!("{name} must be 25, 50, 75 or 100"))
+}
+
 /// WPA 密码：空（不加密时）或 8–64 个字符；更短的 hostapd 起不来，Wi-Fi 就没了。
 fn check_key(name: &str, v: &str) -> Result<(), String> {
     check_value(name, v)?;
@@ -279,6 +280,10 @@ pub fn check_main(params: &Value) -> Result<Value, String> {
     }
     let body = params.as_object().ok_or("params must be an object")?;
     for (k, v) in body {
+        if matches!(k.as_str(), "txpower_2g" | "txpower_5g") {
+            check_power_tier(k, v)?;
+            continue;
+        }
         if k == "wifi_onoff" || RADIO_SWITCHES.iter().any(|(key, ..)| k.as_str() == *key) {
             switch_input(k, v)?;
             continue;
@@ -333,12 +338,15 @@ pub fn main_plan(body: &Map<String, Value>, cur: &Uci) -> Result<Plan, String> {
     if let Some(cc) = body.get("country").and_then(Value::as_str) {
         let cc = luyaz_api::wifi::sanitize_uci_value(cc).to_uppercase();
         if cc.len() == 2 && cc.chars().all(|c| c.is_ascii_alphabetic()) {
-            for (.., radio, _) in BANDS {
+            for (_, _, radio) in BANDS {
                 plan.put(cur, &format!("wireless.{radio}.country"), &cc);
             }
         }
     }
     for (key, value) in body {
+        if matches!(key.as_str(), "txpower_2g" | "txpower_5g") {
+            check_power_tier(key, value)?;
+        }
         if let Some(path) = main_path(key)
             && let Some(v) = body_str(value)
         {
@@ -532,12 +540,12 @@ pub fn plan_for(
         match (kind, prefix, field) {
             (Kind::Main, "", "on" | "module_on") => {}
             (Kind::Main, "", "country") => {
-                for (.., radio, _) in BANDS {
+                for (_, _, radio) in BANDS {
                     plan.put(cur, &format!("wireless.{radio}.country"), &s(v));
                 }
             }
             (Kind::Main, band, f) => {
-                let (_, ap, radio, _) = BANDS
+                let (_, ap, radio) = BANDS
                     .iter()
                     .find(|(p, ..)| *p == band)
                     .ok_or_else(|| format!("not a Wi-Fi setting: {k}"))?;

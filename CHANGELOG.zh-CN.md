@@ -18,6 +18,7 @@
 
 ## Unreleased
 
+- core、lweb、touch：两个 Wi-Fi 频段各有 25%、50%、75%、100% 四档发射功率，同时显示保存档位和驱动读回。Core 按当前信道和固件的上限设置整数 dBm，Wi-Fi 重新启动后恢复所选档位。
 - core、lweb、touch、scripts：管理多份 Mihomo 配置档案，支持规则、全局和直连。CHILL 将各档案缓存分开，切换失败时恢复上一份可用配置。点触屏首页的 Mihomo 状态卡直接打开 CHILL。
 - scripts：修复 U60 Pro CN B11 上绕行 DNS 进程占用输出管道、导致网页绕行操作超时的问题。
 - 管理网页和触屏共用 Core Wi-Fi 事务。切换总开关保留频段偏好和主 AP 设置，确认同时核对原厂设置、接口状态及 hostapd，操作结束后刷新信道显示。
