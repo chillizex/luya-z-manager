@@ -445,6 +445,18 @@ fn txpower_alone_is_hot() {
 }
 
 #[test]
+fn only_an_isolated_radio_disable_qualifies_for_faster_reload_verification() {
+    let mut cfg = uci();
+    cfg.insert("wireless.zte_mbb.wifi_onoff".into(), "1".into());
+    cfg.insert("wireless.zte_mbb.wifi_onoff_by_user".into(), "1".into());
+    cfg.insert("wireless.wifi0.disabled".into(), "0".into());
+    assert!(main_plan(&body(json!({"radio2_disabled": 1})), &cfg).unwrap().radio_off_only());
+    assert!(!main_plan(&body(json!({"radio2_disabled": 1,"channel_5g": "44"})), &cfg).unwrap().radio_off_only());
+    cfg.insert("wireless.wifi0.disabled".into(), "1".into());
+    assert!(!main_plan(&body(json!({"radio2_disabled": 0})), &cfg).unwrap().radio_off_only());
+}
+
+#[test]
 fn txpower_legacy_can_be_restored_but_is_not_a_new_choice() {
     let m = uci();
     let v = vault();

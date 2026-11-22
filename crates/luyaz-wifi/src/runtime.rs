@@ -10,13 +10,27 @@ use crate::{hostapd_count, hostapd_serves, switches, Host, CMD_TIMEOUT, OFF_DEAD
 
 // B11 can tear down a briefly working AP more than seven seconds after reporting power-on.
 const RELOAD_STABLE: Duration = Duration::from_secs(15);
+const FIVE_ONLY_STABLE: Duration = Duration::from_millis(4_500);
+
+pub(super) fn five_ghz_ifindex() -> Option<u32> {
+    let mut file = File::open("/sys/class/net/wlan2/ifindex").ok()?;
+    let mut data = [0; 16];
+    let len = file.read(&mut data).ok()?;
+    let index = std::str::from_utf8(data[..len].trim_ascii()).ok()?.parse().ok()?;
+    (index != 0).then_some(index)
+}
 
 #[derive(Clone, Copy)]
 pub(super) enum Target<'a> {
     Current,
     Aps([bool; 2]),
     Master { wanted: bool, radios_before: [Option<bool>; 2] },
-    Written { expected: &'a Uci, switches: switches::Switches, layout: [bool; 4] },
+    Written {
+        expected: &'a Uci,
+        switches: switches::Switches,
+        layout: [bool; 4],
+        five_index_before: Option<u32>,
+    },
 }
 
 impl Target<'_> {
@@ -54,7 +68,7 @@ impl Target<'_> {
                 }
                 Some(true)
             }
-            Self::Written { expected, switches: flags, layout } => {
+            Self::Written { expected, switches: flags, layout, .. } => {
                 let found = switches();
                 if layout != running {
                     return Some(false);
@@ -80,6 +94,10 @@ impl Target<'_> {
 
     fn stable_for(self) -> Duration {
         match self {
+            Self::Master {
+                wanted: true,
+                radios_before: [Some(false), Some(true)],
+            } => FIVE_ONLY_STABLE,
             Self::Master { wanted: true, .. } | Self::Written { .. } => RELOAD_STABLE,
             _ => Duration::ZERO,
         }
@@ -214,7 +232,7 @@ fn fully_on_with(cfg: &Uci, r: &impl Runtime) -> bool {
 pub(super) fn poll(h: &dyn Host, target: Target<'_>) -> (Option<bool>, Option<Uci>) {
     let start = Instant::now();
     let mut last_known = None;
-    let mut matching_since = None;
+    let mut stability = Stability::default();
     loop {
         let cfg = h.wireless();
         let on = cfg.as_ref().and_then(layout::running_checked);
@@ -222,7 +240,7 @@ pub(super) fn poll(h: &dyn Host, target: Target<'_>) -> (Option<bool>, Option<Uc
         let until = start + if target.wants_on(last_known) { ON_DEADLINE } else { OFF_DEADLINE };
         let result = cfg.as_ref().zip(on).and_then(|(cfg, on)| check(cfg, target, on, Some(until)));
         let now = Instant::now();
-        if now <= until && has_settled(&mut matching_since, now - start, target.stable_for(), result) {
+        if now <= until && stability.observe(target, now - start, result, five_ghz_ifindex) {
             return (Some(true), cfg);
         }
         let left = until.saturating_duration_since(now);
@@ -230,6 +248,36 @@ pub(super) fn poll(h: &dyn Host, target: Target<'_>) -> (Option<bool>, Option<Uc
             return (result.map(|_| false), cfg);
         }
         std::thread::sleep(POLL_EVERY);
+    }
+}
+
+#[derive(Default)]
+struct Stability {
+    matching_since: Option<Duration>,
+    rebuilt_index: Option<u32>,
+}
+
+impl Stability {
+    fn observe(
+        &mut self,
+        target: Target<'_>,
+        now: Duration,
+        found: Option<bool>,
+        read_five_index: impl FnOnce() -> Option<u32>,
+    ) -> bool {
+        let rebuilt = match target {
+            Target::Written { five_index_before: Some(before), .. } if found == Some(true) => {
+                read_five_index().filter(|&index| index != before)
+            }
+            _ => None,
+        };
+        if rebuilt != self.rebuilt_index {
+            // Start a fresh window for the new netdev, even if the old one matched the target.
+            self.matching_since = None;
+            self.rebuilt_index = rebuilt;
+        }
+        let minimum = if rebuilt.is_some() { FIVE_ONLY_STABLE } else { target.stable_for() };
+        has_settled(&mut self.matching_since, now, minimum, found)
     }
 }
 
@@ -355,18 +403,31 @@ mod tests {
         assert_eq!(sample_result(&cfg, master(true), &r), Some(false));
         r.status = Some("state=ENABLED\nssid[0]=home5\n");
         assert_eq!(sample_result(&cfg, master(true), &r), Some(true));
-        let mut since = None;
-        let mut observe = |secs, sample: &Sample| {
-            has_settled(&mut since, Duration::from_secs(secs), master(true).stable_for(),
-                        sample_result(&cfg, master(true), sample))
+        let mut stability = Stability::default();
+        let mut observe = |ms, sample: &Sample| {
+            let target = master(true);
+            stability.observe(target, Duration::from_millis(ms), sample_result(&cfg, target, sample), || None)
         };
-        assert!(!observe(7, &r));
+        assert!(!observe(7_000, &r));
         r.links[1] = Some(false);
-        assert!(!observe(16, &r));
+        assert!(!observe(10_000, &r));
         r.links[1] = Some(true);
-        assert!(!observe(20, &r));
-        assert!(!observe(34, &r));
-        assert!(observe(35, &r));
+        assert!(!observe(11_000, &r));
+        assert!(!observe(14_000, &r));
+        assert!(observe(15_500, &r));
+    }
+
+    #[test]
+    fn dual_band_startup_rejects_an_ap_that_drops_after_going_live() {
+        let target = Target::Master { wanted: true, radios_before: [Some(true); 2] };
+        let mut stability = Stability::default();
+        let mut observe = |secs, found| stability.observe(target, Duration::from_secs(secs), found, || None);
+        assert!(!observe(7, Some(true)));
+        assert!(!observe(14, Some(true)));
+        assert!(!observe(16, Some(false)));
+        assert!(!observe(20, Some(true)));
+        assert!(!observe(34, Some(true)));
+        assert!(observe(35, Some(true)));
     }
 
     #[test]
@@ -376,6 +437,7 @@ mod tests {
             expected: &wanted,
             switches: switches::read(|k| wanted.get(k).map(String::as_str)),
             layout: layout::running_checked(&wanted).unwrap(),
+            five_index_before: None,
         };
         let mut sample = Sample {
             links: [Some(false), Some(true), Some(false), Some(false)],
@@ -412,6 +474,28 @@ mod tests {
     }
 
     #[test]
+    fn faster_radio_off_requires_a_stable_rebuilt_five_ghz_ap() {
+        let wanted = five_only();
+        let target = Target::Written {
+            expected: &wanted,
+            switches: switches::read(|k| wanted.get(k).map(String::as_str)),
+            layout: layout::running_checked(&wanted).unwrap(),
+            five_index_before: Some(10),
+        };
+        let mut state = Stability::default();
+        let mut observe = |ms, matches, index| {
+            state.observe(target, Duration::from_millis(ms), matches, || index)
+        };
+        assert!(!observe(0, Some(true), Some(10)));
+        assert!(!observe(6_000, Some(true), Some(10))); // Still the old AP.
+        assert!(!observe(7_500, Some(true), Some(12))); // New AP, first sample.
+        assert!(!observe(9_000, Some(false), Some(12))); // An intermediate teardown.
+        assert!(!observe(10_500, Some(true), Some(13)));
+        assert!(!observe(13_500, Some(true), Some(13)));
+        assert!(observe(15_000, Some(true), Some(13)));
+    }
+
+    #[test]
     fn reload_waits_past_an_empty_layout_before_the_module_drops() {
         let mut wanted = five_only();
         wanted.insert(RADIO_5G.into(), "1".into());
@@ -419,6 +503,7 @@ mod tests {
             expected: &wanted,
             switches: switches::read(|k| wanted.get(k).map(String::as_str)),
             layout: layout::running_checked(&wanted).unwrap(),
+            five_index_before: None,
         };
         let sample = Sample { links: [Some(false); 4], status: None, processes: Some(0) };
         let mut since = None;

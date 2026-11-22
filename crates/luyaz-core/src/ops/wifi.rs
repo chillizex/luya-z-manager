@@ -150,6 +150,11 @@ impl Plan {
         crate::wifi_power::PREF.map(|key| self.set.iter().any(|(path, _)| path == key))
     }
 
+    pub(super) fn radio_off_only(&self) -> bool {
+        self.vendor.is_none() && matches!(self.set.as_slice(), [(key, value)]
+            if value == "1" && RADIO_SWITCHES.iter().any(|(_, path, _)| key == path))
+    }
+
     /// `wifi.apply` 的 `set`。
     pub fn set_json(&self) -> Value {
         Value::Object(

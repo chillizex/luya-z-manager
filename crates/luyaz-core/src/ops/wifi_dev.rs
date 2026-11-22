@@ -349,6 +349,7 @@ impl WifiDev {
         let module_on = plan.vendor.or(switches.module) == Some(true);
         let power_only = plan.txpower_only();
         let reload = module_on && !power_only && !plan.set.is_empty();
+        let radio_off_only = plan.radio_off_only();
         let power_bands = plan.txpower_changed();
         let expected = reload.then(|| wifi::simulate(&m, &plan));
         let (set, vendor, guest) = (plan.set_json(), plan.vendor, kind == Kind::Guest);
@@ -383,12 +384,7 @@ impl WifiDev {
                     exec: exec.clone(),
                 };
                 let mut data = if let Some(expected) = &expected {
-                    let error = luyaz_wifi::reload(&host, &lk).err();
-                    let mut data = luyaz_wifi::verify_written(&UciHost, expected);
-                    if let Some(e) = error {
-                        data["reload_error"] = json!(e);
-                    }
-                    data
+                    luyaz_wifi::reload_written(&host, &lk, expected, radio_off_only)
                 } else if let Some(wanted) = vendor {
                     luyaz_wifi::verify_master(&UciHost, wanted, switches.radios)
                 } else if power_only {

@@ -433,16 +433,34 @@ pub fn verify_master(h: &dyn Host, wanted: bool, radios_before: [Option<bool>; 2
     verify_target(h, runtime::Target::Master { wanted, radios_before })
 }
 
-/// After a configuration reload, verify the intended settings and layout throughout settling.
-pub fn verify_written(h: &dyn Host, expected: &layout::Uci) -> Value {
-    let Some(layout) = layout::running_checked(expected) else {
-        let cfg = h.wireless();
-        let mut data = observation(cfg.as_ref());
-        data["verified"] = Value::Null;
-        return data;
+/// Reload and verify the intended settings and layout throughout settling.
+/// The fast 2.4 GHz-off path requires the 5 GHz AP to have been recreated.
+pub fn reload_written(
+    h: &dyn Host, lk: &WifiLock, expected: &layout::Uci, radio_off_only: bool,
+) -> Value {
+    let target = layout::running_checked(expected).map(|layout| {
+        let switches = switches::read(|key| expected.get(key).map(String::as_str));
+        let five_index_before = if radio_off_only && layout == [false, true, false, false] {
+            runtime::five_ghz_ifindex()
+        } else {
+            None
+        };
+        runtime::Target::Written { expected, switches, layout, five_index_before }
+    });
+    let error = reload(h, lk).err();
+    let mut data = match target {
+        Some(target) => verify_target(h, target),
+        None => {
+            let cfg = h.wireless();
+            let mut data = observation(cfg.as_ref());
+            data["verified"] = Value::Null;
+            data
+        }
     };
-    let switches = switches::read(|key| expected.get(key).map(String::as_str));
-    verify_target(h, runtime::Target::Written { expected, switches, layout })
+    if let Some(error) = error {
+        data["reload_error"] = json!(error);
+    }
+    data
 }
 
 fn verify_target(h: &dyn Host, target: runtime::Target<'_>) -> Value {
